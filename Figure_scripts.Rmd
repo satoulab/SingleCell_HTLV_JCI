@@ -1,0 +1,677 @@
+---
+title: "Plot Figures"
+author: "Benjy Tan"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+    theme: flatly
+---
+
+## Initial setup
+
+```{r SETUP VARIABLES, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+# Set locale to English
+Sys.setlocale("LC_MESSAGES", 'en_GB.UTF-8')
+set.seed(920101)
+
+# Load frequently used packages
+suppressPackageStartupMessages(library(here))
+suppressPackageStartupMessages(library(methods))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(cowplot))
+suppressPackageStartupMessages(library(stringi))
+suppressPackageStartupMessages(library(Seurat))
+suppressPackageStartupMessages(library(monocle))
+suppressPackageStartupMessages(library(RColorBrewer))
+
+# Load data 
+tcellSO <- readRDS(file = here("Tcell/SO_tcell_clean_harmonySeq_annot_mapToRef.Rds"))
+load(here("Tcell/DEG_res_against_H2.Rdata"))          # DE_against_H2
+load(here("Monocle/CDS_cd4_all_reordered.Rdata"))     # cd4CDS
+load(here("Monocle/DEG_cd4_all_pseudotime.Rdata"))    # diffTab 
+load(here("Monocle/BRANCH_paired.Rdata"))             # branchPair
+load(here("Monocle/BRANCH_global.Rdata"))             # branchGlobal
+
+```
+
+#$$$$$$$$$$$$$$$$$$#
+#                  #  
+#     Figure 1     #
+#                  # 
+#$$$$$$$$$$$$$$$$$$#
+
+```{r FIGURE 1, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+# Figure 1B
+tcellDF <- tcellSO@meta.data %>% 
+  group_by(clinID, clinGrp) %>% 
+  summarise("cellNum" = n(), "medianGenes" = round(median(nFeature_RNA)))
+tcellDF$clinID <- factor(tcellDF$clinID, levels = rev(levels(tcellDF$clinID)))
+
+p1 <- ggplot(tcellDF, aes(x = clinID, fill = clinGrp, y = cellNum)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(x = "", y = "Number of cells recovered") +
+  theme_minimal() +
+  theme(legend.position = "none", axis.text.x = element_text(size = rel(1.5)),
+        axis.text.y = element_text(size = rel(1.5)), axis.title.x = element_text(size = rel(1.5))) +
+  scale_fill_manual(values = alpha(groupCol, 0.7))
+
+p2 <- ggplot(tcellDF, aes(x = clinID, fill = clinGrp, y = medianGenes)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(x = "", y = "Median genes per cell") +
+  theme_minimal() +
+  theme(legend.position = "none", axis.text.x = element_text(size = rel(1.5)),
+        axis.text.y = element_text(size = rel(1.5)), axis.title.x = element_text(size = rel(1.5))) +
+  scale_fill_manual(values = alpha(groupCol, 0.7))
+
+# Figure 1C
+p3 <- myDimPlot(tcellSO, group.by = "cellID", label = TRUE) +
+  NoLegend()
+
+```
+
+#$$$$$$$$$$$$$$$$$$#
+#                  #  
+#     Figure 2     #
+#                  # 
+#$$$$$$$$$$$$$$$$$$#
+
+```{r FIGURE 2, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+# Figure 2A
+# Remove mito/ribo genes from the list, then get up-regulated genes with log2FC > 1
+# Perform functional enrichment for each cluster
+degUp <- list()
+
+for (n in 1:length(DE_against_H2)){
+  df <- DE_against_H2[[n]]
+  df <- df[!grepl("RP[SL]", df$gene), ]
+  df <- df[!grepl("MT-", df$gene), ]
+  df <- df %>% filter((.)[3] <= 0.01)
+  up <- df %>% 
+    dplyr::filter((.)[2] >= 1) %>% 
+    select(gene) %>% 
+    unlist() %>% 
+    unname()
+  degUp[[n]] <- up
+}
+names(degUp) <- names(DE_against_H2)
+
+joinUp <- prepClustEnrich(upList = degUp, grpName = names(degUp))
+joinUp$grp <- factor(joinUp$grp, levels = names(degUp))
+enrichUp <- compareCluster(ENTREZID~grp, data = joinUp, 
+                           fun = "enrichPathway", readable = TRUE)
+p1 <- dotplot(enrichUp, showCategory = 10) +
+  ggtitle("Functional enrichment of up-regulated genes") +
+  theme(plot.title = element_text(face = "bold"))
+
+# Figure 2B
+# Get genes for common up-regulated pathways, then plot heatmap showing expression by cluster
+selectTab <- enrichUp@compareClusterResult %>% 
+  dplyr::filter(Description %in% c("Translocation of ZAP-70 to Immunological synapse",
+                                   "Phosphorylation of CD3 and TCR zeta chains",
+                                   "PD-1 signaling",
+                                   "Generation of second messenger molecules",
+                                   "MHC class II antigen presentation",
+                                   "Costimulation by the CD28 family",
+                                   "Interferon gamma signaling",
+                                   "Downstream TCR signaling",
+                                   "TCR signaling",
+                                   "Interferon Signaling"))
+commonGenes <- selectTab$geneID %>% 
+  unlist() %>% 
+  str_split(pattern = "/") %>% 
+  unlist() %>% 
+  unique() %>% 
+  sort()
+
+DoHeatmap(object = subset(tcell, downsample = 200), features = commonGenes, draw.lines = TRUE, 
+          lines.width = 30, group.colors = mycolors, label = FALSE) + 
+  scale_fill_distiller(palette = "PuOr", na.value = "white")
+
+```
+
+#$$$$$$$$$$$$$$$$$$#
+#                  #  
+#     Figure 3     #
+#                  # 
+#$$$$$$$$$$$$$$$$$$#
+
+```{r FIGURE 3, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+# Load CCA data
+TactDF <- read.table(file = here("CCA/1D_CCA_Tact.tsv"), header = TRUE, row.names = 1)
+colnames(TactDF) <- c("Tact.CCA", "orig.ident", "clinGrp", "clinID")
+TactDF$barcode <- rownames(TactDF)
+
+TregDF <- read.table(file = here("CCA/1D_CCA_Treg.tsv"), header = TRUE, row.names = 1)
+colnames(TregDF) <- c("Treg.CCA", "orig.ident", "clinGrp", "clinID")
+TregDF$barcode <- rownames(TregDF)
+
+# Figure 3A
+v1 <- ggplot(TactDF, aes(x = clinGrp, y = Tact.CCA, fill = clinGrp)) +
+  geom_violin() +
+  geom_boxplot(width = 0.1, outlier.shape = NA, fill = "white") +
+  theme_minimal() +
+  labs(x = "Clinical group", y = "T cell activation CCA score") +
+  scale_fill_manual(values = groupCol)
+
+v2 <- ggplot(TregDF, aes(x = clinGrp, y = Treg.CCA, fill = clinGrp)) +
+  geom_violin() +
+  geom_boxplot(width = 0.1, outlier.shape = NA, fill = "white") +
+  theme_minimal() +
+  labs(x = "Clinical group", y = "Treg CCA score") +
+  scale_fill_manual(values = groupCol)
+
+p1 <- plot_grid(v1, v2, nrow = 1)
+
+# Figure 3B
+combinedDF <- left_join(TregDF, TactDF, by = "barcode")
+combinedDF <- combinedDF %>% 
+  dplyr::select(orig.ident.x, clinGrp.x, clinID.x, Tact.CCA, Treg.CCA, barcode)
+colnames(combinedDF) <- c("orig.ident", "clinGrp", "clinID", "Tact.CCA", "Treg.CCA", "barcode")
+
+p2 <- ggplot(combinedDF, aes(x = Tact.CCA, y = Treg.CCA)) + 
+  geom_point(mapping = aes(color = clinGrp), size = 0.5, alpha = 0.25) +
+  geom_smooth(method = "gam") +
+  scale_color_manual(values = groupCol) +
+  theme_minimal() +
+  labs(x = "T cell activation CCA score", y = "Treg CCA score")
+
+# Figure 3C
+p3 <- plot_cell_trajectory(cd4CDS$All, color_by = "Pseudotime", show_branch_points = FALSE) + 
+  scale_color_distiller(palette = "PuOr") +
+  theme_void() +
+  theme(legend.position = "none", panel.background = element_rect(fill = "grey70"))
+
+# Figure 3D
+plotDF <- as.data.frame(cd4CDS$All@phenoData@data) %>% 
+  dplyr::select(Pseudotime, tcellGrp)
+
+helperDensity <- as.data.frame(cbind(density(plotDF[plotDF$tcellGrp == "Helper", 1])$x,
+                                     density(plotDF[plotDF$tcellGrp == "Helper", 1])$y)) %>% 
+  dplyr::mutate(perc.max.y = 100 * V2 / max(V2)) %>% 
+  dplyr::mutate(ident = "Helper")
+
+nonATLDensity <- as.data.frame(cbind(density(plotDF[plotDF$tcellGrp == "Infected (non-ATL)", 1])$x,
+                                     density(plotDF[plotDF$tcellGrp == "Infected (non-ATL)", 1])$y)) %>% 
+  dplyr::mutate(perc.max.y = 100 * V2 / max(V2)) %>% 
+  dplyr::mutate(ident = "Infected (non-ATL)")
+
+ATLDensity <- as.data.frame(cbind(density(plotDF[plotDF$tcellGrp == "Infected (ATL)", 1])$x,
+                                  density(plotDF[plotDF$tcellGrp == "Infected (ATL)", 1])$y)) %>% 
+  dplyr::mutate(perc.max.y = 100 * V2 / max(V2)) %>% 
+  dplyr::mutate(ident = "Infected (ATL)")
+
+p4 <- ggplot() +
+  xlim(0, 22) +
+  ylim(0, 100) +
+  labs(x = "Pseudotime", y = "Percentage max") +
+  geom_area(data = helperDensity, 
+            mapping = aes(x = V1, y = perc.max.y, fill = ident)) +
+  geom_area(data = nonATLDensity, 
+            mapping = aes(x = V1, y = perc.max.y, fill = ident)) +
+  geom_area(data = ATLDensity, 
+            mapping = aes(x = V1, y = perc.max.y, fill = ident)) +
+  theme_minimal() +
+  scale_fill_manual(name = "Cell clusters",
+                    values = alpha(c(groupCol[2], groupCol[4], "grey30"), 0.5)) +
+  theme(legend.position = "bottom")
+
+# Figure 3E
+# Get dimensions from CDS, then join with CCA data frame by cell barcode
+cdsDim <- as.data.frame(t(cd4CDS$All@reducedDimS))
+cdsDim$barcode <- rownames(cdsDim)
+
+cdsMeta <- as.data.frame(cd4CDS$All@phenoData@data) %>% 
+  dplyr::select(State)
+cdsMeta$barcode <- rownames(cdsMeta)
+
+cdsDim <- dplyr::left_join(cdsDim, cdsMeta, by = "barcode")
+  
+actDF <- left_join(cdsDim, TactDF, by = "barcode") %>% 
+  dplyr::select("V1", "V2", "Tact.CCA", "barcode")
+
+t1 <- ggplot(actDF, aes(x = V1, y = V2, colour = Tact.CCA)) +
+  geom_point(size = 1) +
+  labs(x = "Component 1", y = "Component 2", colour = "T cell activation CCA Score") +
+  scale_color_distiller(palette = "RdBu") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.border = element_blank(), panel.background = element_rect(fill = "grey40"),
+        axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+regDF <- left_join(cdsDim, TregDF, by = "barcode") %>% 
+  dplyr::select("V1", "V2", "Treg.CCA", "barcode")
+
+t2 <- ggplot(regDF, aes(x = V1, y = V2, colour = Treg.CCA)) +
+  geom_point(size = 1) +
+  labs(x = "Component 1", y = "Component 2", colour = "Treg CCA Score") +
+  scale_color_distiller(palette = "RdBu") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.border = element_blank(), panel.background = element_rect(fill = "grey40"),
+        axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank())
+
+p5 <- plot_grid(t1, t2, nrow = 1)
+
+# Figure 3F
+p6 <- plot_cell_trajectory(cd4CDS$All, use_color_gradient = TRUE, 
+                           show_branch_points = FALSE, cell_size = 0.8, 
+                           markers = c("CCR7", "IL7R", "IL2RA", "FOXP3", "CTLA4", "CADM1")) +
+  scale_color_distiller(palette = "RdYlBu")
+
+# Figure 3G
+# Plot heatmap as well as perform pathway enrichment analysis to look for enriched pathwats
+plotDF <- branchGlobal[!grepl("^MT-", branchGlobal$gene_short_name), ]
+plotDF <- plotDF[!grepl("^RP[SL]", plotDF$gene_short_name), ]
+
+branch_genes_to_plot <- plotDF %>% 
+    dplyr::filter(qval < 1e-5) %>%  
+    dplyr::select(gene_short_name) %>% 
+    unlist() %>% 
+    as.character()
+
+branchHeat <- plot_genes_branched_heatmap(cd4CDS$All[branch_genes_to_plot, ], 
+                                          num_clusters = 4,
+                                          branch_point = 2, 
+                                          cores = 12, 
+                                          use_gene_short_name = TRUE,
+                                          show_rownames = TRUE, 
+                                          return_heatmap = TRUE)
+
+myRow <- branchHeat$annotation_row
+myRow <- data.frame(cluster = myRow$Cluster, gene = row.names(myRow),
+                    stringsAsFactors = FALSE)
+
+clust1Path <- enrichGO(myRow[myRow$cluster == 1, 'gene'])
+clust2Path <- enrichGO(myRow[myRow$cluster == 2, 'gene'])
+clust3Path <- enrichGO(myRow[myRow$cluster == 3, 'gene'])
+clust4Path <- enrichGO(myRow[myRow$cluster == 4, 'gene'])
+
+```
+
+#$$$$$$$$$$$$$$$$$$#
+#                  #  
+#     Figure 4     #
+#                  # 
+#$$$$$$$$$$$$$$$$$$#
+
+```{r FIGURE 4, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+# Figure 4B
+indiSample <- c("ATL1", "ATL2", "ATL4", "ATL6", "ATL7")
+
+# Plot pseudotime distribution
+ptPlot <- list()
+
+for (id in indiSample){
+  if (id == "ATL4"){
+    theta <- 0
+  } else {
+    theta <- 180
+  }
+  
+  ptPlot[[id]] <- plot_cell_trajectory(cd4CDS[[id]], color_by = "Pseudotime", cell_size = 0.6,
+                                       show_branch_points = FALSE, theta = theta) +
+    theme_cowplot() +
+    scale_color_distiller(palette = "PuOr") +
+    ggtitle(id) +
+    theme(axis.text = element_blank(), axis.title = element_blank(), axis.ticks = element_blank(),
+          axis.line = element_blank(), panel.background = element_rect(fill = "grey80"),
+          legend.position = "none")
+}
+
+# Plot clinical diagnosis distribution
+clinDxPlot <- list()
+
+for (id in indiSample){
+  if (id == "ATL4"){
+    theta <- 0
+  } else {
+    theta <- 180
+  }
+  
+  clinDxPlot[[id]] <- plot_cell_trajectory(cd4CDS[[id]], color_by = "clinGrp", cell_size = 0.6,
+                                       show_branch_points = FALSE, theta = theta) +
+    theme_cowplot() +
+    scale_color_manual(values = c(groupCol[c(1,4)])) +
+    ggtitle(id) +
+    theme(axis.text = element_blank(), axis.title = element_blank(), axis.ticks = element_blank(),
+          axis.line = element_blank(), panel.background = element_rect(fill = "grey80"),
+          legend.position = "none")
+}
+
+# Plot most expanded clone distribution
+clonePlot <- list()
+
+for (id in indiSample){
+  if (id == "ATL4"){
+    theta <- 0
+  } else {
+    theta <- 180
+  }
+  
+  cd4CDS[[id]]@phenoData@data <- cd4CDS[[id]]@phenoData@data %>% 
+    mutate(labelMostExpand = ifelse(grepl("_clonotype1$", .$clonotype), TRUE, FALSE))
+  
+  clonePlot[[id]] <- plot_cell_trajectory(cd4CDS[[id]], color_by = "labelMostExpand", cell_size = 0.6,
+                                          show_branch_points = FALSE, theta = theta) +
+    theme_cowplot() +
+    scale_color_manual(values = c("grey80", "red")) +
+    ggtitle(id) +
+    theme(axis.text = element_blank(), axis.title = element_blank(), axis.ticks = element_blank(),
+          axis.line = element_blank(), legend.position = "none")
+}
+
+# Combine plots
+p1 <- plot_grid(ncol = 3, plotlist = list(plot_grid(plotlist = ptPlot, ncol = 1),
+                                          plot_grid(plotlist = clinDxPlot, ncol = 1),
+                                          plot_grid(plotlist = clonePlot, ncol = 1)))
+
+# Figure 4C
+s1 <- plot_grid(ncol = 5, plotlist = plotGenePseudo(cdsList = cds[1:5], genes = "CCR7"))
+s2 <- plot_grid(ncol = 5, plotlist = plotGenePseudo(cdsList = cds[1:5], genes = "IL2RA"))
+s3 <- plot_grid(ncol = 5, plotlist = plotGenePseudo(cdsList = cds[1:5], genes = "FOXP3"))
+s4 <- plot_grid(ncol = 5, plotlist = plotGenePseudo(cdsList = cds[1:5], genes = "CTLA4"))
+s5 <- plot_grid(ncol = 5, plotlist = plotGenePseudo(cdsList = cds[1:5], genes = "CADM1"))
+s6 <- plot_grid(ncol = 5, plotlist = plotGenePseudo(cdsList = cds[1:5], genes = "CD40LG"))
+
+p2 <- plot_grid(s1, s2, s3, s4, s5, s6, ncol = 1)
+```
+
+#$$$$$$$$$$$$$$$$$$#
+#                  #  
+#     Figure 5     #
+#                  # 
+#$$$$$$$$$$$$$$$$$$#
+
+```{r FIGURE 5, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+# Figure 5A
+# Get top 200 DEG with pseudotime for each sample
+pseudoDEG <- list()
+
+for (n in 1:length(diffTab)){
+  
+  degDF <- diffTab[[n]]
+  
+  # Remove mitochondrial & ribosomal genes
+  degDF <- degDF[!grepl("^MT-", degDF$gene_short_name), ]
+  degDF <- degDF[!grepl("^RP[SL]", degDF$gene_short_name), ]
+  
+  genes <- degDF %>% 
+    dplyr::filter(qval < 0.01) %>%
+    dplyr::arrange(qval) %>% 
+    head(200) %>% 
+    dplyr::select(gene_short_name) %>% 
+    unlist() %>% 
+    as.character()
+  
+  pseudoDEG[[n]] <- genes
+}
+names(pseudoDEG) <- names(diffTab)
+
+# Only use individual samples (exclude paired & all sample)
+pseudoDEGsingle <- pseudoDEG[1:5]
+
+joinUp <- prepClustEnrich(upList = pseudoDEGsingle, grpName = names(pseudoDEGsingle))
+enrichUp <- compareCluster(ENTREZID~grp, data = joinUp,
+                           fun = "enrichPathway", readable = TRUE)
+enrichUp@compareClusterResult$grp <- factor(enrichUp@compareClusterResult$grp,
+                                             levels = names(pseudoDEGsingle))
+p1 <- dotplot(enrichUp, showCategory = 10) +
+  ggtitle("Functional enrichment of differentially expressed genes with pseudotime") +
+  theme(plot.title = element_text(face = "bold", size = rel(1))) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+# Figure 5B
+# Check overlapping genes
+suppressPackageStartupMessages(library(UpSetR))
+
+upPlot <- upset(fromList(pseudoDEGsingle), 
+            order.by = "degree", 
+            empty.intersections = "on",
+            sets = names(pseudoDEGsingle),
+            keep.order = TRUE, 
+            nintersects = NA,
+            mainbar.y.label = "Gene Intersections",
+            sets.x.label = "Differentially Expressed Genes",
+            text.scale = c(1.5, 1.5, 1, 1, 1.5, 2))
+
+source("http://faculty.ucr.edu/~tgirke/Documents/R_BioCond/My_R_Scripts/overLapper.R") 
+overlapDEG <- overLapper(setlist = pseudoDEGsingle, type = "vennsets")
+
+# Figure 5C
+s1 <- plot_grid(ncol = 5, plotlist = plotGenePseudo(cdsList = cds[1:5], genes = "CD74"))
+s2 <- plot_grid(ncol = 5, plotlist = plotGenePseudo(cdsList = cds[1:5], genes = "HLA-DPB1"))
+s3 <- plot_grid(ncol = 5, plotlist = plotGenePseudo(cdsList = cds[1:5], genes = "HLA-DQB1"))
+s4 <- plot_grid(ncol = 5, plotlist = plotGenePseudo(cdsList = cds[1:5], genes = "HLA-DRB1"))
+s5 <- plot_grid(ncol = 5, plotlist = plotGenePseudo(cdsList = cds[1:5], genes = "HLA-DRB5"))
+
+p3 <- plot_grid(s1, s2, s3, s4, s5, ncol = 1)
+
+# Figure 5D
+pbmcSO <- readRDS(file = here("INTEGRATED/SO_annotate.Rds"))
+
+# Bring in T-cell cluster information into PBMC object
+Idents(tcellSO) <- "tcellGrp"
+Idents(pbmcSO) <- "cellID"
+
+helper <- WhichCells(tcellSO, idents = "Helper")
+infectedNonATL <- WhichCells(tcellSO, idents = "Infected (non-ATL)")
+infectedATL <- WhichCells(tcellSO, idents = "Infected (ATL)")
+apc <- WhichCells(pbmcSO, idents = c("B cells", "Myeloid cells"))
+
+pbmcSO$barcode <- rownames(pbmcSO@meta.data)
+pbmcSO@meta.data <- pbmcSO@meta.data %>% 
+  mutate(mhc2Grp = ifelse((pbmcSO$barcode %in% helper), "Helper",
+                          ifelse((pbmcSO$barcode %in% infectedNonATL), "Infected (non-ATL)",
+                                 ifelse((pbmcSO$barcode %in% infectedATL), "Infected (ATL)",
+                                        ifelse((pbmcSO$barcode %in% apc), "APC", "Others")))))
+rownames(pbmcSO@meta.data) <- pbmcSO$barcode
+pbmc$barcode <- NULL
+
+pbmcSub <- subset(pbmcSub, subset = mhc2Grp %in% c("Helper", "Infected (non-ATL)", "Infected (ATL)", "APC"))
+pbmcSub$mhc2Grp <- factor(pbmcSub$mhc2Grp, levels = c("APC", "Helper", "Infected (non-ATL)", 
+                                                      "Infected (ATL)"))
+
+# Plot MHC Class II expression
+class2 <- c("HLA-DPB1", "HLA-DQB1", "HLA-DRB1", "HLA-DRB5")
+mhc2Grp <- c("APC", "Helper", "Infected (non-ATL)", "Infected (ATL)")
+
+total <- dpb1 <- dqb1 <- drb1 <- drb5 <- hlaB <- NULL
+Idents(pbmcSub) <- "mhc2Grp"
+
+for (n in 1:length(mhc2Grp)){
+  id <- mhc2Grp[[n]]
+  
+  total[[n]] <- length(WhichCells(pbmcSub, idents = id))
+  dpb1[[n]] <- length(WhichCells(pbmcSub, idents = id, expression = `HLA-DPB1` > 0))
+  dqb1[[n]] <- length(WhichCells(pbmcSub, idents = id, expression = `HLA-DQB1` > 0))
+  drb1[[n]] <- length(WhichCells(pbmcSub, idents = id, expression = `HLA-DRB1` > 0))
+  drb5[[n]] <- length(WhichCells(pbmcSub, idents = id, expression = `HLA-DRB5` > 0))
+  hlaB[[n]] <- length(WhichCells(pbmcSub, idents = id, expression = `HLA-B` > 0))
+}
+
+total <- unlist(total)
+dpb1 <- unlist(dpb1)
+dqb1 <- unlist(dqb1)
+drb1 <- unlist(drb1)
+drb5 <- unlist(drb5)
+hlaB <- unlist(hlaB)
+
+newDF <- as.data.frame(cbind(mhc2Grp, total, dpb1, dqb1, drb1, drb5, hlaB))
+newDF$total <- as.integer(newDF$total)
+newDF$dpb1 <- as.integer(newDF$dpb1)
+newDF$dqb1 <- as.integer(newDF$dqb1)
+newDF$drb1 <- as.integer(newDF$drb1)
+newDF$drb5 <- as.integer(newDF$drb5)
+newDF$hlaB <- as.integer(newDF$hlaB)
+
+newDF$perc.HLAB <- newDF$hlaB / newDF$total * 100
+newDF$perc.DPB1 <- newDF$dpb1 / newDF$total * 100
+newDF$perc.DQB1 <- newDF$dqb1 / newDF$total * 100
+newDF$perc.DRB1 <- newDF$drb1 / newDF$total * 100
+newDF$perc.DRB5 <- newDF$drb5 / newDF$total * 100
+
+plotDF <- newDF %>% 
+  select(mhc2Grp, perc.HLAB, perc.DPB1, perc.DQB1, perc.DRB1, perc.DRB5) %>% 
+  reshape2::melt()
+colnames(plotDF) <- c("Group", "HLA", "Percentage")
+plotDF$Group <- factor(plotDF$Group, levels = mhc2Grp)
+
+mhcPlot <- ggplot(data = plotDF, aes(x = HLA, y = Percentage, fill = Group)) +
+  geom_bar(stat = "identity", position = position_dodge()) + 
+  theme_minimal() +
+  labs(x = "", y = "Expressing Cells (%)") +
+  scale_x_discrete(labels = c("perc.HLAB" = "HLA-B", "perc.DPB1" = "HLA-DPB1", "perc.DQB1" = "HLA-DQB1",
+                              "perc.DRB1" = "HLA-DRB1", "perc.DRB5" = "HLA-DRB5")) +
+  scale_fill_manual(values = c(groupCol[1:2], "grey60", groupCol[4])) +
+  theme(legend.position = "bottom")
+
+```
+
+#$$$$$$$$$$$$$$$$$$#
+#                  #  
+#     Figure 6     #
+#                  # 
+#$$$$$$$$$$$$$$$$$$#
+
+```{r FIGURE 6, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+# Figure 6B
+p1 <- plot_cell_trajectory(cd4CDS$Pair, color_by = "Pseudotime", cell_size = 0.6,
+                           show_branch_points = FALSE) +
+    theme_cowplot() +
+    scale_color_distiller(palette = "PuOr") +
+    theme(axis.text = element_blank(), axis.title = element_blank(), axis.ticks = element_blank(),
+          axis.line = element_blank(), panel.background = element_rect(fill = "grey80"),
+          legend.position = "none")
+
+p2 <- plot_cell_trajectory(cd4CDS$Pair, color_by = "orig.ident", cell_size = 0.6,
+                           show_branch_points = FALSE) +
+    theme_cowplot() +
+    scale_color_manual(values = c("#377EB8", "#E41A1C", "#4DAF4A", "#4DAF4A", "#4DAF4A")) +
+    theme(axis.text = element_blank(), axis.title = element_blank(), axis.ticks = element_blank(),
+          axis.line = element_blank(), panel.background = element_rect(fill = "grey80"),
+          legend.position = "none")
+
+cd4CDS$Pair@phenoData@data <- cd4CDS$Pair@phenoData@data %>% 
+    mutate(labelMostExpand = ifelse(grepl("S19_clonotype1$", .$clonotype), "A",
+                                    ifelse(grepl("S23_clonotype1$", .$clonotype), "B", "other")))
+  
+p3 <- plot_cell_trajectory(cd4CDS$Pair, color_by = "labelMostExpand", cell_size = 0.6,
+                           show_branch_points = FALSE) +
+    theme_cowplot() +
+    scale_color_manual(values = c("#377EB8", "#E41A1C", "grey80")) +
+    theme(axis.text = element_blank(), axis.title = element_blank(), axis.ticks = element_blank(),
+          axis.line = element_blank(), legend.position = "none")
+
+plot_grid(p1, p2, p3, nrow = 1)
+
+# Figure 6D
+pairGene <- cd4CDS$Pair[c("CD74", "HLA-DPB1", "HLA-DQB1", "HLA-DRB1", "HLA-DRB5"), ]
+
+plot_genes_branched_pseudotime(cds = pairGene, ncol = 2, branch_point = 2, color_by = "Pseudotime") +
+  scale_color_distiller(palette = "PuOr") +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank(),
+        axis.ticks.x = element_blank(), axis.text.x = element_blank(), 
+        legend.position = "none")
+
+# Figure 6E
+plotDF <- branchPair[!grepl("^MT-", branchPair$gene_short_name), ]
+plotDF <- plotDF[!grepl("^RP[SL]", plotDF$gene_short_name), ]
+
+branch_genes_to_plot <- plotDF %>% 
+  dplyr::filter(qval < 1e-5) %>%  
+  dplyr::select(gene_short_name) %>% 
+  unlist() %>% 
+  as.character()
+  
+branchHeat <- plot_genes_branched_heatmap(cd4CDS$Pair[branch_genes_to_plot, ], num_clusters = 5,
+                                          branch_point = 2, cores = 10, use_gene_short_name = TRUE,
+                                          show_rownames = TRUE, return_heatmap = TRUE)
+
+myRow <- branchHeat$annotation_row
+myRow <- data.frame(cluster = myRow$Cluster, gene = row.names(myRow),
+                    stringsAsFactors = FALSE)
+
+clust1Path <- enrichGO(myRow[myRow$cluster == 1, 'gene'])
+clust2Path <- enrichGO(myRow[myRow$cluster == 2, 'gene'])
+clust3Path <- enrichGO(myRow[myRow$cluster == 3, 'gene'])
+clust4Path <- enrichGO(myRow[myRow$cluster == 4, 'gene'])
+clust5Path <- enrichGO(myRow[myRow$cluster == 5, 'gene'])
+
+# Figure 6F
+# Find DEG between state - top branch is state 2; bottom branch are state 3,4,5
+# Create custom volcano plot to highlight some genes according to DEG heatmap clusters
+cds <- cd4CDS$Pair
+so <- readRDS(file = here("Monocle/SO_pseudotime_pair.Rds"))
+stateDEG <- myFindMarkersV2(so = so, full.test = TRUE, group.by = "State", 
+                            ident.1 = 2, ident.2 = c(3,4,5))
+plotDF <- stateDEG[, 1:3]
+plotDF <- plotDF[removeGenes(plotDF$gene, removeTCR = TRUE), ]
+options(ggrepel.max.overlaps = Inf)
+
+# (1) Prepare vector of genes to label for each cluster
+red <- c("DUSP1", "RAN", "ZFP36", "ZFP36L2", "KLF2")
+blue <- c("TMSB4X", "DNAJB1", "TNFSF9")
+purple <- c("JUN", "NFKBIA")
+yellow <- c("ATP5ME", "ARPC1B", "IL6ST", "NFKBIZ", "DDX17", "NDUFA13", "NDUFA11", 
+           "NDUFB1", "MT2A", "PRDM1", "PMAIP1")
+green <- c("FTH1")
+
+# (2) Prepare data frame
+plotDF2 <- plotDF %>% 
+  dplyr::mutate(threshold = ifelse((Log2FC >= 0.5 & pAdj <= 1e-50), "A",
+                            ifelse((Log2FC <= -0.5 & pAdj <= 1e-50), "B", "C"))) %>% 
+  dplyr::mutate(geneLabels = ifelse(gene %in% red, "Red",
+                             ifelse(gene %in% blue, "Blue",
+                                    ifelse(gene %in% yellow, "Yellow",
+                                           ifelse(gene %in% green, "Green",
+                                                  ifelse(gene %in% purple, "Purple", "None"))))))
+
+# (3) Mark genes to label
+vol <- ggplot(plotDF2, 
+              aes(x = Log2FC, 
+                  y = -log10(pAdj))) +
+  geom_point(aes(colour = threshold), size = 2) +
+  ggrepel::geom_label_repel(aes(fill = geneLabels,
+                                label = ifelse(threshold %in% c("A", "B"),
+                                               rownames(plotDF2), "")),
+                            min.segment.length = 0.5,
+                            nudge_x = 0.5,
+                            size = 5) +
+  ggtitle("DEGs of top branch vs bottom branch") +
+  labs(x = "Log2 Fold Change", 
+       y = "-Log10 Adjusted p-value") +
+  geom_hline(yintercept = -log10(1e-50), 
+             linetype = "dashed") +
+  geom_vline(xintercept = c(-0.5, 0.5), 
+             linetype = "dashed") +
+  scale_color_manual(values = alpha(c("A" = "red", 
+                                      "B" = "blue", 
+                                      "C" = "grey80"), 1)) +
+  scale_fill_manual(values = alpha(c("Red" = "#E33D3A",
+                                     "Blue" = "#45B9F9",
+                                     "Yellow" = "#FFD254",
+                                     "Green" = "#34AD70",
+                                     "Purple" = "#E579E5",
+                                     "None" = "white"), 0.5)) +
+  xlim(-1.5, 1.5) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = rel(1.5), 
+                                  hjust = 0.5, 
+                                  face = "bold"),
+        axis.title = element_text(size = rel(1.5)), 
+        legend.position = "none")
+
+```
+
+
+
+
+
+
