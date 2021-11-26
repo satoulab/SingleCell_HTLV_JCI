@@ -1,0 +1,302 @@
+---
+title: "Functions"
+author: "Benjy Tan"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document:
+    theme: flatly
+---
+
+```{r LOAD REQUIRED PACKAGES, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+suppressPackageStartupMessages(library(org.Hs.eg.db))
+suppressPackageStartupMessages(library(GO.db))
+suppressPackageStartupMessages(library(clusterProfiler))
+
+```
+
+```{r GENERATE CUSTOM COLOR PALETTES, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+mycolors <- c(colorRampPalette(RColorBrewer::brewer.pal(8, "Set1"))(8)[c(1:5,7:8)],
+              colorRampPalette(RColorBrewer::brewer.pal(8, "Dark2"))(8)[1:7],
+              colorRampPalette(RColorBrewer::brewer.pal(8, "Set3"))(8),
+              colorRampPalette(RColorBrewer::brewer.pal(8, "Accent"))(8))
+
+groupCol <- c("#4DAF4A", "#377EB8", "#984EA3", "#E41A1C")
+
+```
+
+```{r REMOVE MITO/RIBO/TCR GENES FROM GENE LIST, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+#' Remove mitochondrial, ribosomal protein and/or TCR genes from a list
+#' 
+#' @param geneList    Vector of genes
+#' @param removeTCR   Whether to remove TCR genes
+#' 
+removeGenes <- function(geneList, removeTCR = FALSE){
+  
+  geneList <- geneList[!grepl("^MT-", geneList)]
+  geneList <- geneList[!grepl("^RP[SL]", geneList)]
+  
+  if (isTRUE(removeTCR)){
+    geneList <- geneList[!grepl("^TRA[CV]", geneList)]
+    geneList <- geneList[!grepl("^TRB[CV]", geneList)]
+  } else {
+    geneList <- geneList
+  }
+  
+  return(geneList)
+}
+
+```
+  
+```{r CONVERT SEURAT OBJECT TO CDS (CellDataSet) OBJECT, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+#' Convert Seurat object to CDS object
+#' 
+#' @param x    Seurat object 
+#' 
+as.CDS <- function(x, expressionFamily = NULL, gene_short_name = "symbol"){
+  exprs <- as(as.matrix(x@assays$RNA@counts), 'sparseMatrix')
+  phenoData <- new('AnnotatedDataFrame', data = x@meta.data)
+  fData <- data.frame(gene_short_name = row.names(exprs), row.names = row.names(exprs))
+  featureData <- new('AnnotatedDataFrame', data = fData)
+  
+  if(is.null(expressionFamily))
+    expressionFamily <- negbinomial.size()
+  
+  cds <- newCellDataSet(exprs, phenoData = phenoData, featureData = featureData,
+                        expressionFamily = expressionFamily)
+  return(cds)
+}
+
+```
+
+```{r PLOTTING FUNCTIONS, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+#' Fix aesthetic changes for Seurat's DimPlot, FeaturePlot & VlnPlot functions
+#' 
+#' @param so                  Seurat object
+#' @param features            Vector of features to plot
+#' @param pt.size             Point size
+#' @param order               Whether to plot cells in order of expression
+#' @param palette             RColorBrewer palette to use
+#' @param group.by            Metadata column to group cells by
+#' @param split.by            Metadata column to split plot by
+#' @param label               Whether to label clusters
+#' @param label.size          Label size
+#' @param ncol                Number of columns to display when combining plots
+#' @param title               Plot title
+#' @param cells.highlight     Vector of cells to highlight
+#' @param sizes.highlight     Size of highlighted cells
+#' 
+myDimPlot <- function(so, 
+                      group.by = NULL, 
+                      split.by = NULL, 
+                      label = FALSE, 
+                      label.size = 7, 
+                      ncol = NULL, 
+                      order = NULL,
+                      title = NULL,
+                      cells.highlight = NULL, 
+                      sizes.highlight = 0.3, 
+                      cols.highlight = NULL){
+  
+  if (is.null(cells.highlight)){
+    cols <- mycolors
+  } else {
+    cols <- "grey85"
+  }
+  
+  plot <- Seurat::DimPlot(object = so, 
+                          cols = cols, 
+                          group.by = group.by, 
+                          split.by = split.by, 
+                          label = label, 
+                          label.size = label.size, 
+                          ncol = ncol, 
+                          order = order,
+                          cells.highlight = cells.highlight,
+                          sizes.highlight = sizes.highlight, 
+                          cols.highlight = cols.highlight) +
+    ggtitle(title) +
+    theme(axis.title = element_blank(), 
+          axis.text = element_blank(), 
+          axis.line = element_blank(), 
+          axis.ticks = element_blank(), 
+          plot.title = element_text(hjust = 0.5))
+  
+  return(plot)
+}
+
+myFeaturePlot <- function(so, 
+                          features, 
+                          split.by = NULL, 
+                          label = FALSE, 
+                          label.size = 7, 
+                          ncol = NULL, 
+                          order = FALSE, 
+                          palette = NULL,
+                          limits = NULL){
+  
+  plot <- Seurat::FeaturePlot(object = so, 
+                              features = features, 
+                              split.by = split.by, 
+                              ncol = ncol,
+                              label = label, 
+                              label.size = label.size,
+                              order = order, 
+                              cols = c("grey85", "red")) &
+      theme(axis.title = element_blank(), 
+            axis.line = element_blank(),
+            axis.text = element_blank(), 
+            axis.ticks = element_blank())
+  
+  if (is.null(palette)){
+    return(plot)
+  } else {
+    plot <- plot & scale_color_distiller(palette = palette, limits = limits)
+    return(plot)
+  }
+}
+
+myVlnPlot <- function(so, 
+                      features, 
+                      pt.size = 0.1, 
+                      group.by = NULL, 
+                      split.by = NULL, 
+                      ncol = NULL){
+  
+  plot <- Seurat::VlnPlot(object = so, 
+                          features = features, 
+                          pt.size = pt.size, 
+                          group.by = group.by,
+                          split.by = split.by, 
+                          ncol = ncol) &
+    theme(axis.title = element_blank(),
+          axis.text.x = element_text(angle = 90, vjust = 0.5))
+  
+  return(plot)
+}
+
+```
+
+```{r FIND CLUSTER MARKERS, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+#' Modify output of Seurat FindMarkers function [version 2]
+#' 
+#' @param so          Seurat object
+#' @param name        Identity name
+#' @param full.test   Whether to run full DE testing to get results for all genes
+#' @param test.use    Test to use - one of "roc", "wilcox", "bimod", "t", "negbinom", "poisson",
+#'                    "LR", "MAST" and "DESeq2"
+#' @param ident.1     Identity class to define markers for
+#' @param ident.2     Identity class for comparison
+#' @param group.by    Group cells to identity class before performing DE
+#' 
+myFindMarkersV2 <- function(so, name = NULL, full.test = FALSE, test.use = "MAST",
+                            ident.1 = NULL, ident.2 = NULL, group.by = NULL){
+  
+  if (isTRUE(full.test)){
+    markers <- FindMarkers(object = so, ident.1 = ident.1, ident.2 = ident.2, 
+                           group.by = group.by, test.use = test.use, 
+                           logfc.threshold = -Inf, min.pct = -Inf, 
+                           min.cells.feature = 1, min.cells.group = 1)
+  } else {
+    markers <- FindMarkers(object = so, ident.1 = ident.1, ident.2 = ident.2, 
+                           group.by = group.by, test.use = test.use)
+  }
+  
+  # Tidy up result table
+  markers$genes <- rownames(markers)
+  markers <- markers %>% 
+    dplyr::select(genes, avg_log2FC, p_val_adj, pct.1, pct.2)
+  
+  if (is.null(name)){
+    colnames(markers) <- c("gene", "Log2FC", "pAdj", "pct1", "pct2")
+  } else {
+    colnames(markers) <- c("gene", paste0(name, "_Log2FC"), paste0(name, "_pAdj"), "pct1", "pct2") 
+  }
+  
+  return(markers)
+}
+
+```
+
+```{r GENERATE CUSTOM COLOR PALETTES, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+#' Prepare DE table to calculate enriched functional categories of each cluster
+#' 
+#' @param upList      List of up-regulated genes for each group
+#' @param downList    List of down-regulated genes for each group
+#' @param grpName     Vector of group names in the order specified in upList & downList
+#' 
+prepClustEnrich <- function(upList = NULL, downList = NULL, grpName){
+  
+  tab <- data.frame()
+  
+  if (is.null(upList)){
+    tab <- tab
+  } else {
+    for (n in 1:length(upList)){
+      geneList <- clusterProfiler::bitr(upList[[n]], fromType = "SYMBOL",
+                                        toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+      geneList$grp <- grpName[n]
+      geneList$expr <- "Upregulated"
+      tab <- rbind(tab, geneList)
+    }
+  }
+  
+  if (is.null(downList)){
+    tab <- tab
+  } else {
+    for (n in 1:length(downList)){
+      geneList <- clusterProfiler::bitr(downList[[n]], fromType = "SYMBOL",
+                                        toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+      geneList$grp <- grpName[n]
+      geneList$expr <- "Downregulated"
+      tab <- rbind(tab, geneList)
+    }
+  }
+  
+  return(tab)
+}
+
+```
+
+```{r GO ENRICHMENT ANALYSIS, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, comment=FALSE, include=FALSE}
+
+#' Perform GO over-representation test and remove redundant terms
+#' 
+#' @param geneList    Vector of gene IDs
+#' @param keyType     Gene key type
+#' @param ont         Sub-ontology to perform analysis on ('BP', 'MF', 'CC' or 'ALL' for all 3)
+#' @param pval        p-value cutoff to report as significant
+#' @param qval        q-value cutoff to report as significant
+#' @param pool        Whether to pool 3 sub-ontologies if ont = 'ALL' (Default is FALSE)
+#' @param simCutOff   Similarity cutoff to remove redundant terms
+#' 
+enrichGO <- function(geneList, keyType = "SYMBOL", ont = "BP", universe = NULL, pval = 0.05, 
+                     qval = 0.05, pool = FALSE, simCutOff = 0.6){
+  
+  # Map gene ID to gene NAME if keytype is not SYMBOL
+  if (keyType == "SYMBOL"){
+    readable <- FALSE
+  } else {
+    readable <- TRUE
+  }
+  
+  # Run over-representation test
+  res <- clusterProfiler::enrichGO(gene = geneList, keyType = keyType, ont = ont, universe = universe, 
+                                   OrgDb = org.Hs.eg.db, readable = readable, pool = pool,
+                                   pAdjustMethod = "BH", pvalueCutoff = pval, qvalueCutoff = qval)
+  
+  # Remove redundant terms based on similarity cutoff using Wang graph-based method
+  res <- clusterProfiler::simplify(res, cutoff = simCutOff, by = "p.adjust", select_fun = min)
+  
+  return(res)
+}
+
+```
+
+
